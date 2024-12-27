@@ -144,7 +144,7 @@ def cluster(Xd, iclust = None, kn = None, nskip = 20, n_neigh = 10, nclust = 200
     tones2 = torch.ones((NN, n_neigh), device = device)
 
     if iclust is None:
-        iclust_init =  kmeans_plusplus(Xg, niter = nclust, seed = seed, device=device)
+        iclust_init =  kmeans_plusplus(Xg, niter=nclust, seed=seed)
         iclust = iclust_init.clone()
     else:
         iclust_init = iclust.clone()
@@ -166,60 +166,56 @@ def cluster(Xd, iclust = None, kn = None, nskip = 20, n_neigh = 10, nclust = 200
     return iclust, isub, M, iclust_init
 
 
-def kmeans_plusplus(Xg, niter = 200, seed = 1, device=torch.device('cuda')):
-    #Xg = torch.from_numpy(Xd).to(dev)    
-    vtot = (Xg**2).sum(1)
-
-    n1 = vtot.shape[0]
-    idx = np.ones(n1, dtype=bool)
+def kmeans_plusplus(Xg, niter=200, seed=1):
+    # Set up indices for subsampling v2, if needed.
+    device = Xg.device
+    n1 = Xg.shape[0]
+    idx = torch.ones(n1, dtype=bool, device=device)
     if n1 > 2**24:
         # Need to subsample v2, torch.multinomial doesn't allow more than 2**24
         # elements. We're just using this to sample some spikes, so it's fine to
         # not use all of them.
         n2 = n1 - 2**24   # number of spikes to remove before sampling
-        remove = np.round(np.linspace(0, n1-1, n2)).astype(int)
+        remove = torch.round(torch.linspace(0, n1-1, n2), device=device).type(int)
         idx[remove] = False
         # Also need to map the indices from the subset back to indices for
         # the full tensor.
         rev_idx = idx.nonzero()[0]
     else:
-        rev_idx = np.arange(n1)
+        rev_idx = torch.arange(n1, dtype=int, device=device)
 
+    # Initialize variables that are iterated on.
+    ntry = 100
+    NN, nfeat = Xg.shape
+    device = Xg.device
+    vtot = (Xg**2).sum(1)
+    mu = torch.zeros((niter, nfeat), device=device)
+    vexp0 = torch.zeros(NN, device=device)
+    iclust = torch.zeros((NN,), dtype=torch.int, device=device)
     torch.manual_seed(seed)
     np.random.seed(seed)
-
-    ntry = 100
-    NN, nfeat = Xg.shape    
-    mu = torch.zeros((niter, nfeat), device = device)
-    vexp0 = torch.zeros(NN,device = device)
-
-    iclust = torch.zeros((NN,), dtype = torch.int, device = device)
+    # Iteratively identify clusters.
     for j in range(niter):
-        v2 = torch.relu(vtot - vexp0)
-        # TODO: instead of pre-computing indices to get around this, just
-        #       set up rev_idx and idx in a way that doesn't require switching
-        #       to cpu.
-        isamp = rev_idx[torch.multinomial(v2[idx], ntry).cpu().numpy()]
-
-        Xc = Xg[isamp]    
-        vexp = 2 * Xg @ Xc.T - (Xc**2).sum(1)
-        
-        dexp = vexp - vexp0.unsqueeze(1)
-        dexp = torch.relu(dexp)
-        vsum = dexp.sum(0)
-
-        imax = torch.argmax(vsum)
-        ix = dexp[:, imax] > 0 
-
-        mu[j] = Xg[ix].mean(0)
-        vexp0[ix] = vexp[ix,imax]
-        iclust[ix] = j
+        _kpp_loop(j, Xg, idx, rev_idx, vtot, mu, vexp0, iclust, ntry=ntry)
 
     return iclust
 
 
-def _kpp_loop():
-    pass
+def _kpp_loop(j, Xg, idx, rev_idx, vtot, mu, vexp0, iclust, ntry=100):
+    v2 = torch.relu(vtot - vexp0)
+    isamp = rev_idx[torch.multinomial(v2[idx], ntry)]
+    Xc = Xg[isamp]    
+    vexp = 2 * Xg @ Xc.T - (Xc**2).sum(1)
+    
+    dexp = vexp - vexp0.unsqueeze(1)
+    dexp = torch.relu(dexp)
+    vsum = dexp.sum(0)
+
+    imax = torch.argmax(vsum)
+    ix = dexp[:, imax] > 0 
+    mu[j] = Xg[ix].mean(0)
+    vexp0[ix] = vexp[ix,imax]
+    iclust[ix] = j
 
 
 def compute_score(mu, mu2, N, ccN, lam):
