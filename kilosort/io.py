@@ -34,7 +34,6 @@ def find_binary(data_dir: Union[str, os.PathLike]) -> Path:
             '*.bin, *.bat, *.dat, or *.raw.'
             )
 
-    # TODO: Why give this preference? Not all binary files will have this tag.
     # If there are multiple binary files, find one with "ap" tag
     if len(filenames) > 1:
         filenames = [f for f in filenames if 'ap.bin' in f.as_posix()]
@@ -184,7 +183,7 @@ def save_probe(probe_dict, filepath):
 
 
 def remove_bad_channels(probe, bad_channels):
-    """Creates a new probe dictionary with listed channels (data rows) removed.
+    """Create a probe dictionary with listed channels (data rows) removed.
     
     Parameters
     ----------
@@ -209,11 +208,38 @@ def remove_bad_channels(probe, bad_channels):
         except IndexError:
             raise IndexError(f"Channel '{k}' was not in probe['chanMap']")
         bad_idx[i] = idx
-    probe['xc'] = np.delete(probe['xc'], bad_idx)
-    probe['yc'] = np.delete(probe['yc'], bad_idx)
-    probe['kcoords'] = np.delete(probe['kcoords'], bad_idx)
-    probe['chanMap'] = np.delete(probe['chanMap'], bad_idx)
+    
+    for k in ['xc', 'yc', 'chanMap', 'kcoords']:
+        probe[k] = np.delete(probe[k], bad_idx)
     probe['n_chan'] = probe['n_chan'] - bad_idx.size
+
+    return probe
+
+
+def select_shank(probe, shank_idx):
+    """Create a probe dictionary containing channels from shank `shank_idx` only.
+    
+    Parameters
+    ----------
+    probe : dict.
+        A Kilosort4 probe dictionary, as returned by `kilosort.io.load_probe`.
+    shank_idx : float.
+        If not None, only channels from the specified shank index will be used.
+
+    Returns
+    -------
+    probe : dict.
+
+    """
+    probe = probe.copy()
+    keep = (probe['kcoords'] == shank_idx)
+    n = keep.sum()
+    if n == 0:
+        raise ValueError(f"Selected empty shank index: {shank_idx}, can't sort.")
+    else:
+        probe['n_chan'] = n
+        for k in ['xc', 'yc', 'chanMap', 'kcoords']:
+            probe[k] = probe[k][keep]
 
     return probe
 
@@ -460,10 +486,13 @@ def save_to_phy(st, clu, tF, Wall, probe, ops, imin, results_dir=None,
         params['hp_filtered'] = True
         params['dat_path'] = f"'{dat_path.resolve().as_posix()}'"
     else:
-        dat_path = Path(ops['settings']['filename'])
+        f = ops['settings']['filename']
+        if not isinstance(f, list): f = [f]
+        dat_path = [Path(p).resolve().as_posix() for p in f]
         params['dtype'] = dtype
         params['hp_filtered'] = False
-        params['dat_path'] = f"'{dat_path.resolve().as_posix()}'"
+        params['dat_path'] = dat_path
+        #params['dat_path'] = f"'{dat_path.resolve().as_posix()}'"
 
     with open((results_dir / 'params.py'), 'w') as f: 
         for key in params.keys():
@@ -573,7 +602,7 @@ class BinaryRWFile:
 
     supported_dtypes = ['int16', 'uint16', 'int32', 'float32']
 
-    def __init__(self, filename: str, n_chan_bin: int, fs: int = 30000, 
+    def __init__(self, filename, n_chan_bin: int, fs: int = 30000, 
                  NT: int = 60000, nt: int = 61, nt0min: int = 20,
                  device: torch.device = None, write: bool = False,
                  dtype: str = None, tmin: float = 0.0, tmax: float = np.inf,
@@ -587,14 +616,15 @@ class BinaryRWFile:
         
         Parameters
         ----------
-        filename : str or Path
-            The filename of the file to read from or write to
+        filename : Path-like or list of Path-likes.
+            The filename of the file(s) to read from or write to
         n_chan_bin : int
             number of channels
         file_object : array-like file object; optional.
             Must have 'shape' and 'dtype' attributes and support array-like
             indexing (e.g. [:100,:], [5, 7:10], etc). For example, a numpy
             array or memmap.
+            Note: `filename` is effectively ignored if `file_object` is not None.
 
         """
         # Extra casting statements to ensure that 64-bit values are used
@@ -618,12 +648,21 @@ class BinaryRWFile:
         self.device = device
         self.uint_set_warning = True
         self.writable = write
+        self.mode = 'w+' if write else 'r'
 
         if file_object is not None:
             dtype = file_object.dtype
         if dtype is None:
             dtype = 'int16'
         self.dtype = dtype
+
+        if isinstance(filename, list) and len(filename) > 1:
+            if file_object is not None:
+                raise ValueError('Cannot specify both file_object and a list of files.')
+            f = BinaryFileGroup(filenames=filename, n_channels=n_chan_bin,
+                                dtype=dtype)
+            file_object = f
+        self.file_object = file_object
 
         if str(self.dtype) not in self.supported_dtypes:
             message = f"""
@@ -635,16 +674,15 @@ class BinaryRWFile:
 
         # Must come after dtype since dtype is necessary for nbytesread
         if file_object is None:
-            total_samples = get_total_samples(filename, n_chan_bin, dtype)
+            self.total_samples = get_total_samples(filename, n_chan_bin, dtype)
         else:
             n, c = file_object.shape
             assert c == n_chan_bin
-            total_samples = n
-
+            self.total_samples = n
 
         self.imin = max(np.int64(tmin*self.fs), 0)
-        self.imax = total_samples if tmax==np.inf \
-                    else min(np.int64(tmax*self.fs), total_samples)
+        self.imax = self.total_samples if tmax==np.inf \
+                    else min(np.int64(tmax*self.fs), self.total_samples)
         self.n_batches = np.int64(np.ceil(self.n_samples / self.NT))
 
         # Check if last batch is too small. If so, drop those samples.
@@ -654,16 +692,6 @@ class BinaryRWFile:
             self.n_batches -= 1
             self.imax -= batch_size
 
-        mode = 'w+' if write else 'r'
-        # Must use total samples for file shape, otherwise the end of the data
-        # gets cut off if tmin,tmax are set.
-        if file_object is not None:
-            # For an already-loaded array-like file object,
-            # such as a NumPy memmap
-            self.file = file_object
-        else:
-            self.file = np.memmap(self.filename, mode=mode, dtype=self.dtype,
-                                  shape=(total_samples, self.n_chan_bin))
 
     @property
     def n_samples(self) -> int:
@@ -693,19 +721,22 @@ class BinaryRWFile:
         size: int
         """
         return np.prod(np.array(self.shape).astype(np.int64))
-
-    def close(self) -> None:
-        """
-        Closes the file.
-        """
-        del(self.file)
-        self.file = None
+    
+    @property
+    def file(self):
+        """Get reference to in-memory file object or open a memmap to file."""
+        if self.file_object is not None:
+            file = self.file_object
+        else:
+            f = self.filename
+            if isinstance(f, list):
+                f = f[0]
+            file = np.memmap(f, mode=self.mode, dtype=self.dtype,
+                             shape=(self.total_samples, self.n_chan_bin))
+        return file
         
     def __enter__(self):
         return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
     def __setitem__(self, *items):
         if not self.writable:
@@ -727,12 +758,13 @@ class BinaryRWFile:
                 self.uint_set_warning = False
         # Convert back from float to file dtype
         data = data.astype(self.dtype)
-        self.file[sample_indices] = data
-        
-    def __getitem__(self, *items):
-        if self.file is None:
-            raise ValueError('Binary file has been closed, data not accessible.')
 
+        self.file[sample_indices] = data
+        if self.file_object is None:
+            self.file.flush()
+
+
+    def __getitem__(self, *items):
         idx, *crop = items
         # Shift indices by minimum sample index.
         sample_indices = self._get_shifted_indices(idx)
@@ -750,6 +782,7 @@ class BinaryRWFile:
             samples = samples + self.shift
 
         return samples
+    
     
     def _get_shifted_indices(self, idx):
         if not isinstance(idx, tuple): idx = tuple([idx])
@@ -787,8 +820,6 @@ class BinaryRWFile:
 
     def padded_batch_to_torch(self, ibatch, return_inds=False):
         """ read batches from file """
-        if self.file is None:
-            raise ValueError('Binary file has been closed, data not accessible.')
 
         bstart, bend = self.get_batch_edges(ibatch)
         data = self.file[bstart : bend]
@@ -834,6 +865,8 @@ class BinaryRWFile:
 
 def get_total_samples(filename, n_channels, dtype=np.int16):
     """Count samples in binary file given dtype and number of channels."""
+    if isinstance(filename, list):
+        filename = filename[0]
     bytes_per_value = np.dtype(dtype).itemsize
     bytes_per_sample = np.int64(bytes_per_value * n_channels)
     total_bytes = os.path.getsize(filename)
@@ -849,24 +882,61 @@ def get_total_samples(filename, n_channels, dtype=np.int16):
 
 
 class BinaryFileGroup:
-    def __init__(self, file_objects):
-        # NOTE: Assumes list order of files matches temporal order for
-        #       concatenation.
-        self.file_objects = file_objects
-        self.dtype = file_objects[0].dtype
-        self.n_chans = file_objects[0].shape[1]
-        for f in file_objects[1:]:
-            assert f.dtype == self.dtype, 'All files must have the same dtype'
-            assert f.shape[1] == self.n_chans, \
-                'All files must have the same number of channels'
+    def __init__(self, file_objects=None, filenames=None,
+                 n_channels=None, dtype=None):
+        # NOTE: Assumes list order of files or objects matches temporal order
+        #       for concatenation.
+        self._file_objects = None
+        self._filenames = None
+        self.n_files = 0
+
+        if file_objects is not None:
+            self._file_objects = file_objects
+            self.dtype = file_objects[0].dtype
+            self.n_chans = file_objects[0].shape[1]
+            self.n_files = len(file_objects)
+            for f in file_objects[1:]:
+                assert f.dtype == self.dtype, 'All files must have the same dtype'
+                assert f.shape[1] == self.n_chans, \
+                    'All files must have the same number of channels'
+        elif filenames is not None:
+            # Must specify n_channels, dtype
+            if n_channels is None or dtype is None:
+                raise ValueError("BinaryFileGroup requires n_channels and dtype "
+                                 "when using filenames option.")
+            self._filenames = filenames
+            self.dtype = dtype
+            self.n_chans = n_channels
+            self.n_files = len(filenames)
+        else:
+            raise ValueError("Must specify either file_objects or filenames")
 
         # Track indices that represent boundary between files. Each entry
         # is the starting index of the subsequent file.
         i = 0
         self.split_indices = []
-        for f in file_objects:
-            i += f.shape[0]
+        for j in range(self.n_files):
+            i += self.get_file_size(j)
             self.split_indices.append(i)
+
+    def get_file(self, i):
+        if self._file_objects is not None:
+            file = self._file_objects[i]
+        else:
+            name = self._filenames[i]
+            n_samples = get_total_samples(name, self.n_chans, self.dtype)
+            file = np.memmap(name, mode='r', dtype=self.dtype,
+                                shape=(n_samples, self.n_chans))
+
+        return file
+    
+    def get_file_size(self, i):
+        if self._file_objects is not None:
+            size = self._file_objects[i].shape[0]
+        else:
+            size = get_total_samples(self._filenames[i], self.n_chans, self.dtype)
+
+        return size
 
     def __getitem__(self, *items):
         # Index into appropriate individual object based on index.
@@ -892,11 +962,14 @@ class BinaryFileGroup:
 
         data = []
         shift = 0
-        for k,f in zip(self.split_indices, self.file_objects):
+        for idx, k in enumerate(self.split_indices):
+            f = self.get_file(idx)
             n_samples = f.shape[0]
             if time_idx.start < k:
                 # At least part of the data is in this file
-                t = slice(int(time_idx.start - shift), int(time_idx.stop - shift))
+                ii = max(int(time_idx.start - shift), 0)
+                jj = max(int(time_idx.stop - shift), 0)
+                t = slice(ii, jj)
                 data.append(f[t, channel_idx])
                 if time_idx.stop <= k:
                     # This is the end of the data to be retrieved
@@ -917,15 +990,11 @@ class BinaryFileGroup:
         return self.split_indices[-1], self.n_chans
     
     @staticmethod
-    def from_filenames(filenames, n_channels, dtype=np.int16, mode='r'):
-        files = []
-        for name in filenames:
-            n_samples = get_total_samples(name, n_channels, dtype)
-            f = np.memmap(name, mode=mode, dtype=dtype,
-                          shape=(n_samples, n_channels))
-            files.append(f)
-        
-        return BinaryFileGroup(files)
+    def from_filenames(filenames, n_channels, dtype=np.int16):
+        # NOTE: This is just an alias now for the below command, retained
+        #       for backwards compatibility.
+        return BinaryFileGroup(filenames=filenames, n_channels=n_channels,
+                               dtype=dtype)
 
 
 class BinaryFiltered(BinaryRWFile):
@@ -949,7 +1018,7 @@ class BinaryFiltered(BinaryRWFile):
         self.invert_sign=invert_sign
         self.artifact_threshold = artifact_threshold
 
-    def filter(self, X, ops=None, ibatch=None):
+    def filter(self, X, ops=None, ibatch=None, skip_preproc=False):
         # pick only the channels specified in the chanMap
         if self.chan_map is not None:
             X = X[self.chan_map]
@@ -962,6 +1031,9 @@ class BinaryFiltered(BinaryRWFile):
             # remove the mean of each channel, and the median across channels
             X = X - torch.median(X, 0)[0]
     
+        if skip_preproc:
+            return X
+
         # high-pass filtering in the Fourier domain (much faster than filtfilt etc)
         if self.hp_filter is not None:
             fwav = fft_highpass(self.hp_filter, NT=X.shape[1])
@@ -993,13 +1065,14 @@ class BinaryFiltered(BinaryRWFile):
             X = torch.from_numpy(samples.T).to(self.device).float()
         return self.filter(X)
         
-    def padded_batch_to_torch(self, ibatch, ops=None, return_inds=False):
+    def padded_batch_to_torch(self, ibatch, ops=None, return_inds=False,
+                              skip_preproc=False):
         if return_inds:
             X, inds = super().padded_batch_to_torch(ibatch, return_inds=return_inds)
-            return self.filter(X, ops, ibatch), inds
+            return self.filter(X, ops, ibatch, skip_preproc=skip_preproc), inds
         else:
             X = super().padded_batch_to_torch(ibatch)
-            return self.filter(X, ops, ibatch)
+            return self.filter(X, ops, ibatch, skip_preproc=skip_preproc)
 
 
 def save_preprocessing(filename, ops, bfile=None, bfile_path=None):

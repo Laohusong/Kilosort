@@ -20,7 +20,7 @@ MAIN_PARAMETERS = {
     # NOTE: n_chan_bin must be specified by user when running through API
     'n_chan_bin': {  
         'gui_name': 'number of channels', 'type': int, 'min': 0, 'max': np.inf,
-        'exclude': [0], 'default': 385, 'step': 'data',
+        'exclude': [0], 'default': None, 'step': 'data',
         'description':
             """
             Total number of channels in the binary file, which may be different
@@ -370,6 +370,18 @@ EXTRA_PARAMETERS = {
             """
     },
 
+    'cluster_neighbors': {
+        'gui_name': 'cluster neighbors', 'type': int, 'min': 2, 'max': np.inf,
+        'exclude': [], 'default': 10, 'step': 'clustering',
+        'description':
+            """
+            Number of nearest spike neighbors to search for in
+            `clustering_qr.neigh_mat` when building the adjacency matrix that
+            defines the graph for clustering. Note that changes to this parameter
+            will affect resource usage and sorting time.
+            """ 
+    },
+
     'cluster_downsampling': {
         'gui_name': 'cluster downsampling', 'type': int, 'min': 1, 'max': np.inf,
         'exclude': [], 'default': 20, 'step': 'clustering',
@@ -379,6 +391,27 @@ EXTRA_PARAMETERS = {
             (can be 1, but that slows down the optimization). 
             """
     },
+
+    'max_cluster_subset': {
+        'gui_name': 'max cluster subset', 'type': int, 'min': 1, 'max': np.inf,
+        'exclude': [], 'default': None, 'step': 'clustering',
+        'description':
+            """
+            Maximum number of spikes to use when searching for nearest neighbors
+            to build the graph used for clustering. Within each clustering center,
+            only a subset of spikes is searched with the size determined by
+            `cluster_downsampling` and the total number of spikes. This sets
+            a maximum on the size of that subset, so that it will not grow without
+            bound for very long recordings. Using a very large number of spikes
+            is not necessary and causes performance bottlenecks.
+
+            Note: In practice, the actual number of spikes used may increase or
+            decrease slightly while staying under the maximum. This happens
+            because the maximum is set by adjusting `cluster_downsampling` on the
+            fly so that it results in a set no larger than the given size.
+            """
+    },
+    # TODO: Add suggested values after more testing on different datasets.
 
     'x_centers': {
         'gui_name': 'x centers', 'type': int, 'min': 1,

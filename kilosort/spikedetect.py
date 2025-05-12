@@ -1,4 +1,5 @@
 import os
+import gc
 import logging
 import warnings
 logger = logging.getLogger(__name__)
@@ -195,7 +196,8 @@ def yweighted(yc, iC, adist, xy, device=torch.device('cuda')):
 def run(ops, bfile, device=torch.device('cuda'), progress_bar=None,
         clear_cache=False, verbose=False):        
     sig = ops['settings']['min_template_size']
-    nsizes = ops['settings']['template_sizes'] 
+    nsizes = ops['settings']['template_sizes']
+    nb = ops['Nbatches']
 
     if ops['settings']['templates_from_data']:
         logger.info('Re-computing universal templates from data.')
@@ -251,7 +253,7 @@ def run(ops, bfile, device=torch.device('cuda'), progress_bar=None,
     try:
         for ibatch in prog:
             if ibatch % log_skip == 0:
-                log_performance(logger, 'debug', f'Batch {ibatch}')
+                log_performance(logger, 'debug', f'Batch {ibatch} of {nb-1} ({100*(ibatch/nb):.1f}%)')
 
             X = bfile.padded_batch_to_torch(ibatch, ops)
             xy, imax, amp, adist = template_match(X, ops, iC, iC2, weigh, device=device)
@@ -274,7 +276,10 @@ def run(ops, bfile, device=torch.device('cuda'), progress_bar=None,
             st[k:k+nsp,5] = xy[:,0].cpu().numpy()
 
             k = k + nsp
-            
+            if clear_cache:
+                gc.collect()
+                torch.cuda.empty_cache()
+
             if progress_bar is not None:
                 progress_bar.emit(int((ibatch+1) / bfile.n_batches * 100))
     except:
@@ -288,7 +293,7 @@ def run(ops, bfile, device=torch.device('cuda'), progress_bar=None,
             pass
         raise
             
-    log_performance(logger, 'debug', f'Batch {ibatch}')
+    log_performance(logger, 'debug', f'Batch {ibatch} of {nb-1} ({100*(ibatch/nb):.1f}%)')
 
     st = st[:k]
     tF = tF[:k]

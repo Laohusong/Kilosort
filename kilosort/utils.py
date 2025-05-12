@@ -1,4 +1,6 @@
 import os, tempfile, shutil, pathlib, psutil
+import time
+import urllib
 import importlib.util
 import logging
 import pprint
@@ -6,8 +8,6 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 from tqdm import tqdm
-from urllib.request import urlopen
-from urllib.error import HTTPError
 
 import torch
 
@@ -18,50 +18,69 @@ if importlib.util.find_spec('pynvml') is not None:
 else:
     _NVML_EXISTS = False
 
-_DOWNLOADS_URL = 'https://www.kilosort.org/downloads'
 _DOWNLOADS_DIR_ENV = os.environ.get("KILOSORT_LOCAL_DOWNLOADS_PATH")
 _DOWNLOADS_DIR_DEFAULT = pathlib.Path.home().joinpath('.kilosort')
 DOWNLOADS_DIR = pathlib.Path(_DOWNLOADS_DIR_ENV) if _DOWNLOADS_DIR_ENV else _DOWNLOADS_DIR_DEFAULT
 PROBE_DIR = DOWNLOADS_DIR.joinpath('probes')
+PROBE_URLS = {
+    # Same as Linear16x1_kilosortChanMap.mat
+    'Linear16x1_test.mat': 'https://osf.io/download/67f012cbc56bef203cb25416/',
+    # Same as neuropixPhase3B1_kilosortChanMap.mat
+    'NeuroPix1_default.mat': 'https://osf.io/download/67f012cc7e1fd38cad82980a/',
+    # Same as NP2_kilosortChanMap.mat
+    'NeuroPix2_default.mat': 'https://osf.io/download/67f012ce033d25194f829812/'
+}
 
-# use mat file probes because they enable disconnected channels
-probe_names = [
-    'neuropixPhase3A_kilosortChanMap.mat',
-    'neuropixPhase3B1_kilosortChanMap.mat',\
-    'neuropixPhase3B2_kilosortChanMap.mat',
-    'NP2_kilosortChanMap.mat', 
-    'Linear16x1_kilosortChanMap.mat',
-    ]
 
 def template_path(basename='wTEMP.npz'):
     """ currently only one set of example templates to use"""
     return cache_template_path(basename)
 
+
 def cache_template_path(basename):
-    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    url = f'{_DOWNLOADS_URL}/{basename}'
     cached_file = os.fspath(DOWNLOADS_DIR.joinpath(basename)) 
     if not os.path.exists(cached_file):
+        url = 'https://osf.io/download/6807fb5958b763aae139aa60/'
         logger.info('Downloading: "{}" to {}\n'.format(url, cached_file))
         download_url_to_file(url, cached_file, progress=True)
     return cached_file
+
 
 def download_probes(probe_dir=None):
     if probe_dir is None:
         probe_dir = PROBE_DIR
     probe_dir.mkdir(parents=True, exist_ok=True)
-    for probe_name in probe_names:
-        url = f'{_DOWNLOADS_URL}/{probe_name}'
+    for probe_name, url in PROBE_URLS.items():
         cached_file = os.fspath(probe_dir.joinpath(probe_name)) 
         if not os.path.exists(cached_file):
             logger.info('Downloading: "{}" to {}\n'.format(url, cached_file))
             try:
                 download_url_to_file(url, cached_file, progress=True)
-            except HTTPError as e:
+            except urllib.error.HTTPError as e:
                 logger.info(f'Unable to download probe {probe_name}, error:')
                 logger.info(e)
 
 
+def retry_download(func, n_tries=5):
+    def retry(*args, **kwargs):
+        i = 0
+        while True:
+            try:
+                func(*args, **kwargs)
+                break
+            except urllib.error.HTTPError as e:
+                # Try it several times, wait a couple seconds between attempts.
+                if i < n_tries:
+                    print(f'Download failed, retrying... {i}/{n_tries-1}')
+                    i += 1
+                    time.sleep(1)
+                else:
+                    raise e
+    
+    return retry
+
+
+@retry_download
 def download_url_to_file(url, dst, progress=True):
     r"""Download object at the given URL to a local path.
             Thanks to torch, slightly modified
@@ -74,7 +93,7 @@ def download_url_to_file(url, dst, progress=True):
     file_size = None
     import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
-    u = urlopen(url)
+    u = urllib.request.urlopen(url)
     meta = u.info()
     if hasattr(meta, 'getheaders'):
         content_length = meta.getheaders("Content-Length")
@@ -136,15 +155,15 @@ def log_performance(log=None, level=None, header=None):
         getattr(log, level)(f'{header}')
 
     getattr(log, level)('*'*56)
-    # TODO: This part is slow, on the order of ms versus micro-seconds for GPU check.
-    #       Find a faster way to check main memory and cpu usage.
     getattr(log, level)(f'CPU usage:    {psutil.cpu_percent():5.2f} %')
 
     memory = psutil.virtual_memory()
-    used = memory.used / 2**30
+    avail = memory.available / 2**30
     total = memory.total / 2**30
-    pct = (used / total) * 100
-    getattr(log, level)(f'Memory:       {pct:5.2f} %     |{used:10.2f}   / {total:8.2f} GB')
+    used = total - avail
+    pct = memory.percent
+    getattr(log, level)(f'Mem used:     {pct:5.2f} %     | {used:10.2f} GB')
+    getattr(log, level)(f'Mem avail:    {avail:5.2f} / {total:5.2f} GB')
     getattr(log, level)('-'*54)
 
     if torch.cuda.is_available():

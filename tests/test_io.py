@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from kilosort import io
 
@@ -101,8 +102,6 @@ def test_bat_extension(torch_device, data_directory):
         bfile = io.BinaryFiltered(filename, C, device=torch_device)
         x = bfile[0:100]  # Test data retrieval
 
-        bfile.close()
-
     finally:
         # Delete memmap file and re-raise exception
         path.unlink()
@@ -127,8 +126,6 @@ def test_dat_extension(torch_device, data_directory):
         assert filename == path
         bfile = io.BinaryFiltered(filename, C, device=torch_device)
         x = bfile[0:100]  # Test data retrieval
-
-        bfile.close()
 
     finally:
         # Delete memmap file and re-raise exception
@@ -172,11 +169,8 @@ def test_tmin_tmax(torch_device, data_directory):
         assert X2.min() == 100 + 2*NT - nt
         assert X2.max() == 849
 
-        bfile.close()
-
     finally:
         # Delete memmap file and re-raise exception
-        bfile.close()
         path.unlink()
 
 
@@ -205,11 +199,8 @@ def test_tmin_only(torch_device, data_directory):
         assert bfile[400:].max() == 999
         assert bfile.n_batches == 2
 
-        bfile.close()
-
     finally:
         # Delete memmap file and re-raise exception
-        bfile.close()
         path.unlink()
 
 
@@ -238,9 +229,45 @@ def test_tmax_only(torch_device, data_directory):
         assert bfile[700:].max() == 779
         assert bfile.n_batches == 3
 
-        bfile.close()
-
     finally:
         # Delete memmap file and re-raise exception
-        bfile.close()
         path.unlink()
+
+
+def test_file_group(torch_device, data_directory, bfile):
+    file = data_directory / 'ZFM-02370_mini.imec0.ap.short.bin'
+    fs = bfile.fs
+    n_chans = bfile.n_chan_bin
+
+    # Test with file_objects option
+    # Load as three 15-second files instead of one 45-second file.
+    objs = [np.memmap(file, dtype='int16', shape=bfile.shape, mode='r')
+            for _ in range(3)]
+    objs[0] = objs[0][:int(15*fs),:]
+    objs[1] = objs[1][int(15*fs):int(30*fs),:]
+    objs[2] = objs[2][int(30*fs):,:]
+    bfg = io.BinaryFileGroup(file_objects=objs)
+    bfile2 = io.BinaryFiltered(
+        filename='test', n_chan_bin=n_chans, fs=fs, chan_map=bfile.chan_map,
+        device=torch_device, file_object=bfg, dtype='int16'
+        )
+
+    # First batch, overlapping batch, and last batch
+    # (assumes 45s test dataset with 2s batch size)
+    for i in [0, 7, 22]:
+        b1 = bfile.padded_batch_to_torch(i, skip_preproc=True)
+        b2 = bfile2.padded_batch_to_torch(i)
+        assert torch.allclose(b1, b2)
+
+    # Test with filenames option
+    files = [file]*3  # Load the same data three times
+    bfile3 = io.BinaryFiltered(
+        filename=files, n_chan_bin=n_chans, fs=fs, chan_map=bfile.chan_map,
+        device=torch_device, dtype='int16'
+    )
+
+    # First and first, last and last, last of original and last of concat
+    for i,j in [(0,0), (21,21), (22,67)]:
+        b1 = bfile.padded_batch_to_torch(i, skip_preproc=True)
+        b2 = bfile3.padded_batch_to_torch(j)
+        assert torch.allclose(b1, b2)

@@ -124,13 +124,11 @@ def get_spike_waveforms(spikes, results_dir, bfile=None, chan=None):
 
     if chan is not None:
         waves = waves[chan,:]
-    
-    bfile.close()
 
     return waves
 
 
-def cluster_templates(cluster_id, results_dir, mean=False, best=False):
+def cluster_templates(cluster_id, results_dir, mean=False, best=False, spike_subset=None):
     """Get template-like centroid for this `cluster_id`, scaled for each spike.
     
     Note that template here actually refers to the final clusters. The
@@ -150,6 +148,15 @@ def cluster_templates(cluster_id, results_dir, mean=False, best=False):
     best : bool; default=False
         If True, return single channel 'template(s)' for this cluster_id using
         the channel with the largest norm.
+    spike_subset : np.ndarray; optional.
+        Array of indices specifying which spikes to use, as returned by
+        `get_cluster_spikes` or `mean_waveform`. This helps reduce processing
+        time for large datasets if only a subset of the spikes are
+        ultimately used.
+        
+        For example, `spike_subset = [0,2,5]` would use the first, third,
+        and sixth spike (in order of increasing spike time), regardless of
+        what the actual spike times are.
 
     Return
     ------
@@ -162,6 +169,8 @@ def cluster_templates(cluster_id, results_dir, mean=False, best=False):
     results_dir = Path(results_dir)
     spike_clusters = np.load(results_dir / 'spike_clusters.npy')
     spike_idx = (spike_clusters == cluster_id).nonzero()[0]
+    if spike_subset is not None:
+        spike_idx = spike_idx[spike_subset]
     temps = get_templates(spike_idx, results_dir)
     if best:
         chan = get_best_channel(results_dir, cluster_id)

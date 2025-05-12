@@ -1,12 +1,14 @@
 from pathlib import Path
 import shutil
 import os
+import urllib
+import time
 
 import pytest
 import torch
 
 from kilosort import io, DEFAULT_SETTINGS
-from kilosort.utils import download_probes, DOWNLOADS_DIR
+from kilosort.utils import download_probes, DOWNLOADS_DIR, retry_download
 
 
 @pytest.fixture(scope='session')
@@ -72,7 +74,7 @@ def data_directory(download, capture_mgr, gpu):
     data_path.mkdir(parents=True, exist_ok=True)
 
     binary_path = data_path / 'ZFM-02370_mini.imec0.ap.short.bin'
-    binary_url = 'https://www.kilosort.org/downloads/ZFM-02370_mini.imec0.ap.short.zip'
+    binary_url = 'https://osf.io/download/67effd64f74150d8738b7f34/'
     if (download == 'binary') or (download == 'both'):
         if binary_path.is_file():
             binary_path.unlink()
@@ -83,10 +85,10 @@ def data_directory(download, capture_mgr, gpu):
 
     if gpu:
         results_path = data_path / 'saved_results_gpu/'
-        results_url = 'https://www.kilosort.org/downloads/pytest_gpu.zip'
+        results_url = 'https://osf.io/download/knmdc/'
     else:
         results_path = data_path / 'saved_results/'
-        results_url = 'https://www.kilosort.org/downloads/pytest.zip'
+        results_url = 'https://osf.io/download/67effcf3501ff1ec1b8b7f18/'
     if ((download == 'results') or (download == 'both')):
         if results_path.is_dir():
             shutil.rmtree(results_path.as_posix())
@@ -109,14 +111,13 @@ def download_data(local, remote):
     import zipfile
 
     zip_file = local.with_suffix('.zip')
-    download_url_to_file(remote, zip_file)  
+    download_url_to_file(remote, zip_file)
     with zipfile.ZipFile(zip_file, "r") as zip_ref:
         zip_ref.extractall(local.parent)
     zip_file.unlink()  # delete zip archive after extracting data
 
-# TODO: look at tenacity package, determine if this is necessary, would introduce
-#       another dependency
-# @retry
+
+@retry_download
 def download_url_to_file(url, dst, progress=True):
     """Download object at the given URL to a local path.
     
@@ -151,13 +152,12 @@ def download_url_to_file(url, dst, progress=True):
     else:
         file_size = None
 
-    # We deliberately save to a temp file and move it after
-    # TODO: explain why
+    # We deliberately save to a temp file and move it after download is finished,
+    # so that any failed downloads don't leave behind partial data.
     dst = dst.expanduser()
     dst_dir = dst.parent
     f = tempfile.NamedTemporaryFile(delete=False, dir=dst_dir)
     print(f"\nDownloading: {url}")
-
     try:
         with tqdm(total=file_size, disable=(not progress),
                   unit='B', unit_scale=True, unit_divisor=1024) as pbar:
@@ -221,5 +221,3 @@ def bfile(saved_ops, torch_device, data_directory):
     bfile = io.bfile_from_ops(ops, filename=filename, device=torch_device)
     
     return bfile
-
-### End

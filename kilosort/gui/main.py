@@ -11,7 +11,7 @@ from kilosort.gui import (
     DataConversionBox
 )
 from kilosort.gui.logger import setup_logger
-from kilosort.io import BinaryFiltered, remove_bad_channels
+from kilosort.io import BinaryFiltered, remove_bad_channels, select_shank
 from kilosort.utils import DOWNLOADS_DIR, download_probes
 from qtpy import QtCore, QtGui, QtWidgets
 
@@ -105,10 +105,10 @@ class KilosortGUI(QtWidgets.QMainWindow):
 
         self.header_box = HeaderBox(self)
         self.converter = DataConversionBox(self)
+        self.run_box = RunBox(self)
         self.settings_box = SettingsBox(self)
         self.probe_view_box = ProbeViewBox(self)
         self.data_view_box = DataViewBox(self)
-        self.run_box = RunBox(self)
         self.message_log_box = MessageLogBox(self)
 
         self.setAcceptDrops(True)
@@ -185,28 +185,7 @@ class KilosortGUI(QtWidgets.QMainWindow):
 
     def dropEvent(self, event):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
-        filename = files[0]
-        self.settings_box.set_data_file_path_from_drag_and_drop(filename)
-
-        # NOTE: May choose to re-enable this at some point, but for now I don't
-        #       think it's necessary and the repeated dialog popups are pretty
-        #       intrusive.
-
-        # if self.context is None:
-        #     self.settings_box.set_data_file_path_from_drag_and_drop(filename)
-        # else:
-        #     response = QtWidgets.QMessageBox.warning(
-        #         self,
-        #         "Are you sure?",
-        #         "You are attempting to load a new file while another file "
-        #         "is already loaded. Are you sure you want to proceed?",
-        #         QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-        #         QtWidgets.QMessageBox.No
-        #         )
-        #        
-        #     if response == QtWidgets.QMessageBox.Yes:
-        #         self.settings_box.set_data_file_path_from_drag_and_drop(filename)
-
+        self.settings_box.set_data_file_path_from_drag_and_drop(files)
 
     def setup(self):
         self.setWindowTitle(f"Kilosort4")
@@ -332,10 +311,14 @@ class KilosortGUI(QtWidgets.QMainWindow):
     def set_parameters(self):
         settings = self.settings_box.settings
         bad_channels = self.settings_box.bad_channels
+        shank_idx = self.settings_box.shank_idx
 
         self.data_path = settings["data_file_path"]
         self.results_directory = settings["results_dir"]
-        self.probe_layout = remove_bad_channels(settings["probe"], bad_channels)
+        probe = remove_bad_channels(settings["probe"], bad_channels)
+        if shank_idx is not None:
+            probe = select_shank(probe, shank_idx)
+        self.probe_layout = probe
         self.probe_name = settings["probe_name"]
         self.num_channels = settings["n_chan_bin"]
 
@@ -345,9 +328,6 @@ class KilosortGUI(QtWidgets.QMainWindow):
         params['do_CAR'] = self.run_box.do_CAR_check.isChecked()
         params['invert_sign'] = self.run_box.invert_sign_check.isChecked()
         params['verbose_log'] = self.run_box.verbose_check.isChecked()
-
-        assert params
-
         self.params = params
 
     def do_load(self):
@@ -361,8 +341,6 @@ class KilosortGUI(QtWidgets.QMainWindow):
             self.setup_data_view()
             self.update_run_box()
             self.data_view_box.whitened_button.click()
-        except Exception as e:
-            print(e)
         finally:
             self.disable_all_input(False)
             QtWidgets.QApplication.restoreOverrideCursor()
@@ -382,80 +360,51 @@ class KilosortGUI(QtWidgets.QMainWindow):
         shift = self.params['shift']
         scale = self.params['scale']
 
+        args = [self.data_path, n_channels]
+        kwargs = {
+            'fs': sample_rate, 'chan_map': chan_map, 'device': self.device,
+            'tmin': tmin, 'tmax': tmax, 'shift': shift, 'scale': scale,
+            'artifact_threshold': artifact, 'dtype': data_dtype,
+            'file_object': self.file_object
+        }
+
         if chan_map.max() >= n_channels:
             raise ValueError(
                 f'Largest value of chanMap exceeds channel count of data, '
                 'make sure chanMap is 0-indexed.'
             )
 
-        binary_file = BinaryFiltered(
-            filename=self.data_path,
-            n_chan_bin=n_channels,
-            fs=sample_rate,
-            chan_map=chan_map,
-            device=self.device,
-            dtype=data_dtype,
-            tmin=tmin,
-            tmax=tmax,
-            artifact_threshold=artifact,
-            shift=shift,
-            scale=scale,
-            file_object=self.file_object
-        )
-
+        # Load raw data
+        binary_file = BinaryFiltered(*args, **kwargs)
         self.context.binary_file = binary_file
 
+        # Load high-pass filtered data to compute whitening matrix
         self.context.highpass_filter = preprocessing.get_highpass_filter(
-            fs=sample_rate,
-            cutoff=cutoff,
-            device=self.device
-        )
-
-        with BinaryFiltered(
-            filename=self.data_path,
-            n_chan_bin=n_channels,
-            fs=sample_rate,
-            chan_map=chan_map,
+            fs=sample_rate, cutoff=cutoff, device=self.device
+            )
+        bfile_whiten = BinaryFiltered(
+            *args, **kwargs,
             hp_filter=self.context.highpass_filter,
-            device=self.device,
-            dtype=data_dtype,
-            tmin=tmin,
-            tmax=tmax,
-            artifact_threshold=artifact,
-            shift=shift,
-            scale=scale,
-            file_object=self.file_object
-        ) as bin_file:
-            self.context.whitening_matrix = preprocessing.get_whitening_matrix(
-                f=bin_file,
-                xc=xc,
-                yc=yc,
-                nskip=nskip,
             )
 
+        # Load high-pass filtered and whitened data
+        self.context.whitening_matrix = preprocessing.get_whitening_matrix(
+            f=bfile_whiten, xc=xc, yc=yc, nskip=nskip,
+            )
+        del bfile_whiten  # only used for computing whitening matrix
+
         filt_binary_file = BinaryFiltered(
-            filename=self.data_path,
-            n_chan_bin=n_channels,
-            fs=sample_rate,
-            chan_map=chan_map,
+            *args, **kwargs,
             hp_filter=self.context.highpass_filter,
             whiten_mat=self.context.whitening_matrix,
-            device=self.device,
-            dtype=data_dtype,
-            tmin=tmin,
-            tmax=tmax,
-            artifact_threshold=artifact,
-            shift=shift,
-            scale=scale,
-            file_object=self.file_object
-        )
-
+            )
         self.context.filt_binary_file = filt_binary_file
 
         self.data_view_box.set_whitening_matrix(self.context.whitening_matrix)
         self.data_view_box.set_highpass_filter(self.context.highpass_filter)
 
     def add_file_object(self):
+        # Only needed for file objects loaded through data conversion tool.
         self.file_object = self.converter.file_object
         # NOTE: This filename will not actually be loaded the usual way, it's
         #       just there to keep track of where the data is coming from
@@ -541,24 +490,12 @@ class KilosortGUI(QtWidgets.QMainWindow):
         self.data_view_box.prepare_for_new_context()
         self.probe_view_box.prepare_for_new_context()
         self.message_log_box.prepare_for_new_context()
-
-        self.close_binary_files()
-
         self.context = None
-
-    def close_binary_files(self):
-        if self.context is not None:
-            if self.context.binary_file is not None:
-                self.context.binary_file.close()
-
-            if self.context.filt_binary_file is not None:
-                self.context.filt_binary_file.close()
 
     @QtCore.Slot()
     def reset_gui(self):
         self.num_channels = None
         self.context = None
-        self.close_binary_files()
         self.probe_view_box.reset()
         self.data_view_box.reset()
         self.settings_box.reset()
@@ -570,14 +507,12 @@ class KilosortGUI(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         # Make sure all threads and pop-out windows are closed as well.
-        self.message_log_box.save_log_file()
         self.message_log_box.popout_window.close()
         for _, p in self.run_box.plots.items():
             p.close()
         self.run_box.current_worker.terminate()
         if self.converter.conversion_thread is not None:
             self.converter.conversion_thread.terminate()
-        self.close_binary_files()
 
         event.accept()
 
