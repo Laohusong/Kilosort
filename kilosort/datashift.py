@@ -29,7 +29,7 @@ def bin_spikes(ops, st):
     batch_id = st[:,4].copy()
 
     # always use 20 bins for amplitude binning
-    F = np.zeros((Nbatches, dmax, 20))
+    F = np.zeros((Nbatches, dmax, 20)) #! 相当于对于每一个bantch的每一个block,都有一个20大小的向量,记录了不同幅度大小的peak分布情况
     for t in range(ops['Nbatches']):
         # consider only spikes from this batch
         ix = (batch_id==t).nonzero()[0]
@@ -82,16 +82,19 @@ def align_block2(F, ysamp, ops, device=torch.device('cuda')):
     niter = 10
     dall = np.zeros((niter, Nbatches))
 
+    #! nonrigid iteration
     # at each iteration, align each batch to the template fingerprint
     # Fg is incrementally modified, and cumulative shifts are accumulated over iterations
     for iter in range(niter):
         # for each vertical shift in the range -n to n, compute the dot product
         for t in range(len(dt)):
-            Fs = torch.roll(Fg, dt[t], 1)
+            #! torch.roll存在问题！！！
+            Fs = torch.roll(Fg, dt[t], 1)   
             dc[t] = (Fs * F0).mean(-1).mean(-1).cpu().numpy()
 
+        #! this is to update the template fingerprint
         # for all but the last iteration, align the batches 
-        if iter<niter-1:
+        if iter<niter-1:   
             # the maximum dot product is the best match for each batch
             imax = np.argmax(dc, 0)
 
@@ -223,3 +226,17 @@ def run(ops, bfile, device=torch.device('cuda'), progress_bar=None,
     ops['iKxx'] = torch.linalg.inv(Kxx + 0.01 * torch.eye(Kxx.shape[0], device=device))
 
     return ops, st
+
+
+"""
+(1)进行了一次初步的spike detection
+(2)做了一个binning,将peak转化成了一个数组F,形状为(Nbatches, dmax, 20),dmax是探针y轴的总长除以binning_depth
+20代表将amplitude进行标准化(包含对数变化)分成了20组,代表着amplitude的大小(也就是说明,这里的correction是单纯的基于peak的频率和强度来决定的)
+(3)进行十次迭代对齐。
+- 对于前1次迭代,将第300个batch作为模板,(如果不足600个batch则使用中间的batch),对于之后的迭代使用迭代后的F的平均值作为模板
+- 对于前9次迭代,其他batch使用torch.roll进行位移,然后计算与模板的dot product,找到最大的dot product,然后记录,并按照这个dot product进行位移
+- 前九次的迭代都是刚性的迭代,位移值是binning_depth的倍数
+- 第十次迭代,模板取对应block的F,对于每一个block,计算与模板的dot product,并且使用一个讨巧的插值算法得到更细致的位移值
+- 对于每一个block,将前九次的位移值以及第十次的属于自己的位移值相加,得到最终的位移值dshift,这个值是一个(Nbatches, nblocks)的矩阵
+(4)计算每个channel与channel之间的插值矩阵Kxx,用于之后的插值计算
+"""

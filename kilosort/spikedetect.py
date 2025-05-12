@@ -296,3 +296,20 @@ def run(ops, bfile, device=torch.device('cuda'), progress_bar=None,
     ops['iC2'] = iC2
     ops['weigh'] = weigh
     return st, tF, ops
+
+"""
+1. 获得wPCA和wTEMP(func: extract_wPCA_wTEMP)
+(1)(func: extract_snippets) 通过maxpool和sumpool,先获取超越threshold局部最大值, 再从其中挑选邻域6个channel30个采样点内的唯一值
+(2)通过TruncatedSVD获得wPCA(n_components, n_features)
+(3)通过KMeans获得wTEMP(n_clusters, n_features)
+2. 获得模板中心(func: template_centers), 近邻通道(func: nearest_chans)
+3. 模板匹配(func: template_match)
+(1)根据模板中心, 近邻通道, 近邻模板, 计算每个通道的距离,并且计算每个通道对于任意通道的权重
+(2)对信号 X 和预定义模板 wTEMP 进行卷积
+(3) 结合相邻通道的权重以及卷积结果计算特定通道的局部最大响应以及匹配度
+4. 最后信息处理
+(1)通过yweighted函数计算spike的准确y坐标
+(2)tF数组存储了每个spike在每个通道上的PCA特征
+(3)st数组存储了每个spike的时间, y坐标, 匹配度, 模板索引, 批次索引, 通道索引
+
+"""
